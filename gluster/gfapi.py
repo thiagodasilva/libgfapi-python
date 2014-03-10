@@ -14,11 +14,12 @@
 # limitations under the License.
 
 import ctypes
-from ctypes.util import find_library
 import os
 import stat
 import errno
+import basefilesystem as fs
 
+from ctypes.util import find_library
 from contextlib import contextmanager
 
 # Disclaimer: many of the helper functions (e.g., exists, isdir) where copied
@@ -87,7 +88,7 @@ api.glfs_fstat.restype = ctypes.c_int
 api.glfs_fstat.argtypes = [ctypes.c_void_p, ctypes.POINTER(Stat)]
 
 
-class File(object):
+class GlusterFile(fs.BaseFile):
 
     def __init__(self, fd):
         self.fd = fd
@@ -182,7 +183,7 @@ class File(object):
         return ret
 
 
-class Dir(object):
+class GlusterDir(fs.BaseDir):
 
     def __init__(self, fd):
         # Add a reference so the module-level variable "api" doesn't
@@ -207,16 +208,16 @@ class Dir(object):
         return entry
 
 
-class Volume(object):
-
-    # Housekeeping functions.
+class GlusterFilesystem(fs.BaseFilesystem):
 
     def __init__(self, host, volid, proto="tcp", port=24007):
         # Add a reference so the module-level variable "api" doesn't
-        # get yanked out from under us (see comment above File def'n).
+        # get yanked out from under us.
         self._api = api
+        self.xattr_default_size = 256
         self.fs = api.glfs_new(volid)
         api.glfs_set_volfile_server(self.fs, proto, host, port)
+        api.glfs_init(self.fs)
 
     def __del__(self):
         self._api.glfs_fini(self.fs)
@@ -224,9 +225,6 @@ class Volume(object):
 
     def set_logging(self, path, level):
         api.glfs_set_logging(self.fs, path, level)
-
-    def mount(self):
-        return api.glfs_init(self.fs)
 
     def chown(self, path, uid, gid):
         """
@@ -252,7 +250,7 @@ class Volume(object):
 
         fileobj = None
         try:
-            fileobj = File(fd)
+            fileobj = GlusterFile(fd)
             yield fileobj
         finally:
             fileobj.close()
@@ -274,9 +272,10 @@ class Volume(object):
         """
         return self.stat(filename).st_size
 
-    def getxattr(self, path, key, maxlen):
-        buf = ctypes.create_string_buffer(maxlen)
-        rc = api.glfs_getxattr(self.fs, path, key, buf, maxlen)
+    def getxattr(self, path, key, nofollow=False):
+        buf = ctypes.create_string_buffer(self.xattr_default_size)
+        rc = api.glfs_getxattr(self.fs, path, key, buf,
+                               self.xattr_default_size)
         if rc < 0:
             err = ctypes.get_errno()
             raise IOError(err, os.strerror(err))
@@ -328,7 +327,7 @@ class Volume(object):
                 dir_list.append(name)
         return dir_list
 
-    def listxattr(self, path):
+    def listxattr(self, path, nofollow=False):
         buf = ctypes.create_string_buffer(512)
         rc = api.glfs_listxattr(self.fs, path, buf, 512)
         if rc < 0:
@@ -393,7 +392,7 @@ class Volume(object):
 
         fileobj = None
         try:
-            fileobj = File(fd)
+            fileobj = GlusterFile(fd)
             yield fileobj
         finally:
             fileobj.close()
@@ -403,7 +402,7 @@ class Volume(object):
         if not fd:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
-        return Dir(fd)
+        return GlusterDir(fd)
 
     def removexattr(self, path, key):
         ret = api.glfs_removexattr(self.fs, path, key)
@@ -412,8 +411,8 @@ class Volume(object):
             raise IOError(err, os.strerror(err))
         return ret
 
-    def rename(self, opath, npath):
-        ret = api.glfs_rename(self.fs, opath, npath)
+    def rename(self, src, dst):
+        ret = api.glfs_rename(self.fs, src, dst)
         if ret < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
@@ -467,8 +466,8 @@ class Volume(object):
         except OSError as e:
             onerror(self.rmdir, path, e)
 
-    def setxattr(self, path, key, value, vlen):
-        ret = api.glfs_setxattr(self.fs, path, key, value, vlen, 0)
+    def setxattr(self, path, key, value, flags=0):
+        ret = api.glfs_setxattr(self.fs, path, key, value, len(value), flags)
         if ret < 0:
             err = ctypes.get_errno()
             raise IOError(err, os.strerror(err))
@@ -536,3 +535,14 @@ class Volume(object):
                     yield x
         if not topdown:
             yield top, dirs, nondirs
+
+    def _mode2flags(self, mode):
+        flags = os.O_RDONLY
+        if (mode in ['r', 'rb', 'rt']):
+            flags = os.O_RDONLY
+        elif (mode in ['w', 'wb', 'wt']):
+            flags = os.O_WRONLY
+        elif (mode in ['rw']):
+            flags = os.O_RDWR
+
+        return flags
