@@ -565,7 +565,8 @@ class TestVolume(unittest.TestCase):
                 self.assertTrue(isinstance(fd, gfapi.GlusterFile))
                 self.assertEqual(mock_glfs_open.call_count, 1)
                 mock_glfs_open.assert_called_once_with(2,
-                                                       "file.txt", os.O_WRONLY)
+                                                       "file.txt",
+                                                       os.O_WRONLY)
 
     def test_open_fail_exception(self):
         mock_glfs_open = Mock()
